@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
 			firstSeen: now,
 			lastSeen: now,
 			printers,
-			agentVersion,
+			...(agentVersion ? { agentVersion } : {}),
 		};
 		await ref.set(agent);
 		const res: PollResponse = { status: "unapproved" };
@@ -40,12 +40,13 @@ export async function POST(request: NextRequest) {
 	}
 
 	const existing = snap.data() as Agent;
-	await ref.update({
+	const updateFields: Record<string, unknown> = {
 		hostname,
 		lastSeen: now,
 		printers,
-		agentVersion: agentVersion ?? existing.agentVersion ?? null,
-	});
+	};
+	if (agentVersion) updateFields.agentVersion = agentVersion;
+	await ref.update(updateFields);
 
 	if (existing.status !== "approved") {
 		const res: PollResponse = { status: "unapproved" };
