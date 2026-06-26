@@ -27,6 +27,8 @@ export function AgentCard({ agent, live }: { agent: Agent; live: boolean }) {
 	const [busy, startTransition] = useTransition();
 	const [error, setError] = useState<string | null>(null);
 	const [copied, setCopied] = useState(false);
+	const [testPrintBusy, setTestPrintBusy] = useState<string | null>(null);
+	const [testPrintSent, setTestPrintSent] = useState<string | null>(null);
 
 	async function updateStatus(status: AgentStatus) {
 		setError(null);
@@ -41,6 +43,28 @@ export function AgentCard({ agent, live }: { agent: Agent; live: boolean }) {
 			return;
 		}
 		startTransition(() => router.refresh());
+	}
+
+	async function sendTestPrint(printer: string) {
+		setError(null);
+		setTestPrintBusy(printer);
+		try {
+			const res = await fetch(`/api/agents/${agent.fingerprint}/test-print`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ printer }),
+			});
+			if (!res.ok) {
+				const body = await res.json().catch(() => ({}));
+				setError(body.error ?? "test print failed");
+				return;
+			}
+			setTestPrintSent(printer);
+			setTimeout(() => setTestPrintSent(null), 4000);
+			startTransition(() => router.refresh());
+		} finally {
+			setTestPrintBusy(null);
+		}
 	}
 
 	function copyFingerprint() {
@@ -94,6 +118,30 @@ export function AgentCard({ agent, live }: { agent: Agent; live: boolean }) {
 				<Row label="Printers">
 					{agent.printers.length === 0 ? (
 						<span className="text-sm text-slate-400 italic">none detected</span>
+					) : agent.status === "approved" ? (
+						<div className="flex flex-col gap-1.5">
+							{agent.printers.map((p) => {
+								const sending = testPrintBusy === p;
+								const justSent = testPrintSent === p;
+								return (
+									<div key={p} className="flex items-center justify-between gap-2">
+										<span className="truncate text-sm text-slate-800">{p}</span>
+										<button
+											type="button"
+											onClick={() => sendTestPrint(p)}
+											disabled={sending || !!testPrintBusy}
+											className={`shrink-0 rounded-md border px-2 py-1 text-xs font-medium transition disabled:opacity-60 ${
+												justSent
+													? "border-emerald-300 bg-emerald-50 text-emerald-700"
+													: "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+											}`}
+										>
+											{justSent ? "✓ Queued" : sending ? "Sending…" : "Send test print"}
+										</button>
+									</div>
+								);
+							})}
+						</div>
 					) : (
 						<div className="flex flex-wrap gap-1.5">
 							{agent.printers.map((p) => (
@@ -107,6 +155,17 @@ export function AgentCard({ agent, live }: { agent: Agent; live: boolean }) {
 						</div>
 					)}
 				</Row>
+
+				{agent.lastTestPrint && (
+					<Row label="Last test print">
+						<div className="text-sm text-slate-700">
+							<span className="font-medium">{agent.lastTestPrint.printer}</span>
+							<span className="ml-2 text-xs text-slate-500">
+								{formatRelative(agent.lastTestPrint.queuedAt)}
+							</span>
+						</div>
+					</Row>
+				)}
 
 				<Row label="Machine ID">
 					<button

@@ -8,6 +8,11 @@ export interface Agent {
 	lastSeen: number;
 	printers: string[];
 	agentVersion?: string;
+	lastTestPrint?: {
+		printer: string;
+		queuedAt: number;
+		jobId: string;
+	};
 }
 
 export interface PollRequest {
