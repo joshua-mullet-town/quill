@@ -26,3 +26,24 @@ export async function PATCH(
 	revalidatePath("/");
 	return NextResponse.json({ ok: true, fingerprint, status });
 }
+
+export async function DELETE(
+	_request: NextRequest,
+	{ params }: { params: Promise<{ fingerprint: string }> }
+) {
+	const { fingerprint } = await params;
+	const ref = db.collection("agents").doc(fingerprint);
+	const snap = await ref.get();
+	if (!snap.exists) {
+		return NextResponse.json({ error: "not found" }, { status: 404 });
+	}
+
+	const jobsSnap = await ref.collection("jobs").get();
+	const batch = db.batch();
+	for (const d of jobsSnap.docs) batch.delete(d.ref);
+	batch.delete(ref);
+	await batch.commit();
+
+	revalidatePath("/");
+	return NextResponse.json({ ok: true, fingerprint, deleted: true });
+}

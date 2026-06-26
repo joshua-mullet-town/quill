@@ -45,6 +45,20 @@ export function AgentCard({ agent, live }: { agent: Agent; live: boolean }) {
 		startTransition(() => router.refresh());
 	}
 
+	async function deleteAgent() {
+		setError(null);
+		if (!confirm(`Delete ${agent.hostname} (${agent.fingerprint.slice(0, 12)}…) permanently? This cannot be undone.`)) {
+			return;
+		}
+		const res = await fetch(`/api/agents/${agent.fingerprint}`, { method: "DELETE" });
+		if (!res.ok) {
+			const body = await res.json().catch(() => ({}));
+			setError(body.error ?? "delete failed");
+			return;
+		}
+		startTransition(() => router.refresh());
+	}
+
 	async function sendTestPrint(printer: string) {
 		setError(null);
 		setTestPrintBusy(printer);
