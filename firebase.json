@@ -2,5 +2,10 @@
 	"firestore": {
 		"rules": "firestore.rules",
 		"indexes": "firestore.indexes.json"
+	},
+	"apphosting": {
+		"backendId": "quill",
+		"rootDir": "/",
+		"ignore": ["node_modules", ".git", ".next", "**/.next/**", "firebase-debug.log", ".env*.local"]
 	}
 }
