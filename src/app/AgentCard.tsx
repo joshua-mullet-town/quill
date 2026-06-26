@@ -242,14 +242,24 @@ export function AgentCard({ agent, live }: { agent: Agent; live: boolean }) {
 					</button>
 				)}
 				{agent.status === "revoked" && (
-					<button
-						type="button"
-						onClick={() => updateStatus("approved")}
-						disabled={busy}
-						className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
-					>
-						Re-approve
-					</button>
+					<>
+						<button
+							type="button"
+							onClick={deleteAgent}
+							disabled={busy}
+							className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-600 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-300 disabled:opacity-50"
+						>
+							Delete
+						</button>
+						<button
+							type="button"
+							onClick={() => updateStatus("approved")}
+							disabled={busy}
+							className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+						>
+							Re-approve
+						</button>
+					</>
 				)}
 			</div>
 
