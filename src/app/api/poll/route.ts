@@ -57,14 +57,13 @@ export async function POST(request: NextRequest) {
 		.doc(fingerprint)
 		.collection("jobs")
 		.where("status", "==", "queued")
-		.orderBy("queuedAt", "asc")
 		.limit(10)
 		.get();
 
-	const jobs = jobsSnap.docs.map((d) => {
-		const data = d.data();
-		return { id: d.id, printer: data.printer, zpl: data.zpl };
-	});
+	const jobs = jobsSnap.docs
+		.map((d) => ({ id: d.id, data: d.data() }))
+		.sort((a, b) => (a.data.queuedAt ?? 0) - (b.data.queuedAt ?? 0))
+		.map(({ id, data }) => ({ id, printer: data.printer, zpl: data.zpl }));
 
 	if (jobs.length > 0) {
 		const batch = db.batch();
