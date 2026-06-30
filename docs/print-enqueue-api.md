@@ -58,7 +58,12 @@ Body:
 
 Responses:
 
-- `200` → `{ ok, jobId, printer, queuedAt, trackingNumber, docType }`
+- `200` → `{ ok, jobId, printer, queuedAt, trackingNumber, docType, previewOk, previewImage }`
+  - `previewImage` is a `data:image/png;base64,…` render of the **exact ZPL that
+    printed** (rendered server-side via Labelary from the same single buy — no
+    second carrier call). The extension shows this image; it never handles ZPL.
+  - `previewOk` is `false` and `previewImage` is `null` if the render service was
+    unreachable. The **print still fired** — only the preview degrades.
 - `401` / `404` / `400` as above; `500` if FedEx sandbox creds aren't configured;
   `502` on a carrier failure.
 

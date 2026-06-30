@@ -3,6 +3,7 @@ import { db } from "@/lib/firebase-admin";
 import { revalidatePath } from "next/cache";
 import { isAuthorizedEnqueue } from "@/lib/enqueue-auth";
 import { buyFedExZplLabel, type Shipment } from "@/lib/fedex-label";
+import { renderZplPreview } from "@/lib/zpl-preview";
 import type { Agent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -22,10 +23,17 @@ export const runtime = "nodejs";
 //     shipTo?: { name, street, city, state, zip, country, residential, phone },
 //     packages?: [{ length, width, depth, weight }]
 //   }
-//   200 → { ok, jobId, printer, queuedAt, trackingNumber, docType }
+//   200 → { ok, jobId, printer, queuedAt, trackingNumber, docType,
+//           previewImage, previewOk }
 //   Errors mirror /enqueue (401/404/400) plus 502 on carrier failure, 500 if creds unset.
 //
 // Credentials come from env (FEDEX_SANDBOX_*) — never in the request, never logged.
+//
+// PREVIEW: the 200 carries previewImage — a data:image/png render of the EXACT
+// ZPL we printed (rendered server-side via Labelary, from the SAME single buy, no
+// double-buy). The extension shows that image; it never handles ZPL. The preview
+// DEGRADES CLEANLY: if Labelary is down, previewOk is false and previewImage is
+// null, but the print still fired (the job is already enqueued before we render).
 
 const DEFAULT_SHIP_TO = {
 	name: "Quill Print Proof",
@@ -148,6 +156,11 @@ export async function POST(request: NextRequest) {
 		...(trackingNumber ? { trackingNumber } : {}),
 	});
 
+	// Render a preview of the EXACT ZPL we just enqueued. This runs AFTER the job
+	// is committed, so a Labelary outage never affects the print — it only omits
+	// the preview (previewOk:false, previewImage:null).
+	const preview = await renderZplPreview(zpl);
+
 	revalidatePath("/");
 	return NextResponse.json({
 		ok: true,
@@ -156,5 +169,7 @@ export async function POST(request: NextRequest) {
 		queuedAt: now,
 		trackingNumber,
 		docType: label.docType,
+		previewOk: preview.ok,
+		previewImage: preview.previewImage,
 	});
 }
