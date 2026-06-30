@@ -42,8 +42,20 @@ Responses:
 
 ## `POST /api/buy-and-print`
 
-Buy a real **FedEx sandbox** label in ZPLII (thermal) format. Sandbox labels are
-watermarked **"TEST LABEL - DO NOT SHIP"** — free, non-billing.
+Buy a real **sandbox** label in **ZPL** (thermal) format for **FedEx or UPS**,
+and either enqueue it for printing or just preview it. Sandbox labels are
+watermarked (FedEx **"TEST LABEL - DO NOT SHIP"**, UPS **"SAMPLE"**) — free,
+non-billing.
+
+**Carrier** is chosen by `serviceType`:
+
+- UPS numeric service codes `01` / `02` / `03` / `12` / `13` / `59` → **UPS**
+  (OAuth Basic → `/api/shipments/v2409/ship`, ZPL label).
+- Anything else, e.g. `FEDEX_GROUND` / `FEDEX_*` → **FedEx** (OAuth form →
+  `/ship/v1/shipments`, ZPLII label).
+
+Both yield raw ZPL the Zebra prints, and both render the preview through the same
+Labelary path.
 
 Two **modes**, set by `mode` (default `"dispatch"`):
 
@@ -60,14 +72,15 @@ Body:
 | `mode`        | `"dispatch"` \| `"display"`  | default `"dispatch"`                           |
 | `fingerprint` | string                       | required in **dispatch** mode; ignored in display |
 | `printer`     | string                       | required in **dispatch** mode; must be a printer the agent reported |
-| `serviceType` | string (optional)            | default `FEDEX_GROUND`                          |
+| `serviceType` | string (optional)            | default `FEDEX_GROUND`; UPS codes `01/02/03/12/13/59` route to UPS |
 | `shipTo`      | object (optional)            | `{ name, street, city, state, zip, country, residential, phone }` — sane default if omitted |
 | `packages`    | array (optional)             | `[{ length, width, depth, weight }]` — sane default if omitted |
 
 Responses:
 
-- `200` (dispatch) → `{ ok, mode:"dispatch", dispatched:true, jobId, printer, queuedAt, trackingNumber, docType, previewOk, previewImage }`
-- `200` (display) → `{ ok, mode:"display", dispatched:false, jobId:null, printer:null, queuedAt:null, trackingNumber, docType, previewOk, previewImage }`
+- `200` (dispatch) → `{ ok, mode:"dispatch", carrier, dispatched:true, jobId, printer, queuedAt, trackingNumber, docType, previewOk, previewImage }`
+- `200` (display) → `{ ok, mode:"display", carrier, dispatched:false, jobId:null, printer:null, queuedAt:null, trackingNumber, docType, previewOk, previewImage }`
+  - `carrier` is `"fedex"` or `"ups"`.
   - `previewImage` is a `data:image/png;base64,…` render of the **exact ZPL** that
     was bought (rendered server-side via Labelary from the same single buy — no
     second carrier call). The extension shows this image; it never handles ZPL.
@@ -75,11 +88,14 @@ Responses:
     unreachable. In dispatch mode the **print still fired** — only the preview degrades.
 - `401` (any mode, bad/no token); in **dispatch** mode also `404` (agent not found)
   / `400` (missing fingerprint or printer, agent not approved, printer not reported);
-  `500` if FedEx sandbox creds aren't configured; `502` on a carrier failure.
+  `500` if the chosen carrier's sandbox creds aren't configured; `502` on a carrier failure.
 
-FedEx credentials come from env (`FEDEX_SANDBOX_API_KEY`, `FEDEX_SANDBOX_SECRET`,
-`FEDEX_SANDBOX_ACCOUNT`, optional `FEDEX_SANDBOX_OAUTH_URL` / `FEDEX_SANDBOX_SHIP_URL`)
-— never in the request, never logged.
+Credentials come from env, never in the request, never logged:
+
+- FedEx: `FEDEX_SANDBOX_API_KEY`, `FEDEX_SANDBOX_SECRET`, `FEDEX_SANDBOX_ACCOUNT`,
+  optional `FEDEX_SANDBOX_OAUTH_URL` / `FEDEX_SANDBOX_SHIP_URL`.
+- UPS: `UPS_SANDBOX_CLIENT_ID`, `UPS_SANDBOX_CLIENT_SECRET`, `UPS_SANDBOX_ACCOUNT`,
+  optional `UPS_SANDBOX_OAUTH_URL` / `UPS_SANDBOX_SHIP_URL`.
 
 ## The job shape (what the agent polls for)
 

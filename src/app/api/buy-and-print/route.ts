@@ -3,21 +3,27 @@ import { db } from "@/lib/firebase-admin";
 import { revalidatePath } from "next/cache";
 import { isAuthorizedEnqueue } from "@/lib/enqueue-auth";
 import { buyFedExZplLabel, type Shipment } from "@/lib/fedex-label";
+import { buyUpsZplLabel, UPS_SERVICE_CODES } from "@/lib/ups-label";
 import { renderZplPreview } from "@/lib/zpl-preview";
 import type { Agent } from "@/lib/types";
 
 export const runtime = "nodejs";
 
-// Quill carrier-backend path: buy a REAL FedEx SANDBOX label in ZPLII format.
-// Two modes, set by body.mode (default "dispatch" — current proven behavior):
+// Quill carrier-backend path: buy a REAL SANDBOX label in ZPL format for FedEx
+// OR UPS, branched by serviceType. Both carriers' sandbox labels are watermarked
+// (FedEx "TEST LABEL - DO NOT SHIP", UPS "SAMPLE") — free, non-billing.
 //
+// CARRIER branch (by serviceType): UPS numeric service codes (01/02/03/12/13/59)
+// → UPS (OAuth Basic → /api/shipments/v2409/ship, ZPL label). Everything else
+// (FEDEX_*) → FedEx (OAuth form → /ship/v1/shipments, ZPLII label). Both yield
+// raw ZPL the Zebra prints, and the SAME Labelary path renders the preview.
+//
+// Two modes, set by body.mode (default "dispatch"):
 //   "dispatch" — buy + enqueue the ZPL for a target agent/printer (the print
 //                path). Requires fingerprint + a printer the agent reported.
 //   "display"  — buy + render a preview ONLY; NOTHING is enqueued, nothing goes
 //                to any printer. For the extension's "just show the label" mode.
 //                fingerprint/printer are optional (no agent is touched).
-//
-// Sandbox labels read "TEST LABEL - DO NOT SHIP" — free, non-billing.
 //
 // CONTRACT:
 //   POST /api/buy-and-print
@@ -26,13 +32,13 @@ export const runtime = "nodejs";
 //     mode?: "dispatch" | "display",  // default "dispatch"
 //     fingerprint?: string,   // required in dispatch mode; ignored in display
 //     printer?: string,       // required in dispatch mode; must be reported by the agent
-//     serviceType?: string,   // default "FEDEX_GROUND"
+//     serviceType?: string,   // default "FEDEX_GROUND"; UPS codes 01/02/03/12/13/59 → UPS
 //     shipTo?: { name, street, city, state, zip, country, residential, phone },
 //     packages?: [{ length, width, depth, weight }]
 //   }
-//   200 (dispatch) → { ok, mode:"dispatch", dispatched:true, jobId, printer,
+//   200 (dispatch) → { ok, mode:"dispatch", carrier, dispatched:true, jobId, printer,
 //                      queuedAt, trackingNumber, docType, previewOk, previewImage }
-//   200 (display)  → { ok, mode:"display", dispatched:false, jobId:null,
+//   200 (display)  → { ok, mode:"display", carrier, dispatched:false, jobId:null,
 //                      printer:null, queuedAt:null, trackingNumber, docType,
 //                      previewOk, previewImage }
 //   Errors mirror /enqueue (401/404/400) plus 502 on carrier failure, 500 if creds unset.
@@ -116,34 +122,55 @@ export async function POST(request: NextRequest) {
 		}
 	}
 
-	const creds = {
-		apiKey: process.env.FEDEX_SANDBOX_API_KEY || "",
-		secret: process.env.FEDEX_SANDBOX_SECRET || "",
-		account: process.env.FEDEX_SANDBOX_ACCOUNT || "",
-		oauthUrl: process.env.FEDEX_SANDBOX_OAUTH_URL || "",
-		shipUrl: process.env.FEDEX_SANDBOX_SHIP_URL || "",
-	};
-	if (!creds.apiKey || !creds.secret) {
-		return NextResponse.json(
-			{ error: "FedEx sandbox credentials not configured on server" },
-			{ status: 500 }
-		);
-	}
+	// Carrier-branch on serviceType: UPS numeric service codes → UPS; everything
+	// else (FEDEX_*) → FedEx. Both paths buy a real SANDBOX label in ZPL.
+	const carrier = UPS_SERVICE_CODES.includes(serviceType) ? "ups" : "fedex";
 
 	const shipment: Shipment = {
 		shipTo: body.shipTo || DEFAULT_SHIP_TO,
 		packages: body.packages || DEFAULT_PACKAGES,
 	};
 
-	// Buy the label (sandbox, ZPLII). The raw label bytes never get logged.
+	// Buy the label (sandbox, ZPL). The raw label bytes never get logged.
 	let label, trackingNumber;
 	try {
-		const result = await buyFedExZplLabel(
-			shipment,
-			serviceType,
-			creds,
-			todayStamp()
-		);
+		let result;
+		if (carrier === "ups") {
+			const upsCreds = {
+				clientId: process.env.UPS_SANDBOX_CLIENT_ID || "",
+				clientSecret: process.env.UPS_SANDBOX_CLIENT_SECRET || "",
+				account: process.env.UPS_SANDBOX_ACCOUNT || "",
+				oauthUrl: process.env.UPS_SANDBOX_OAUTH_URL || "",
+				shipUrl: process.env.UPS_SANDBOX_SHIP_URL || "",
+			};
+			if (!upsCreds.clientId || !upsCreds.clientSecret) {
+				return NextResponse.json(
+					{ error: "UPS sandbox credentials not configured on server" },
+					{ status: 500 }
+				);
+			}
+			result = await buyUpsZplLabel(shipment, serviceType, upsCreds);
+		} else {
+			const fedexCreds = {
+				apiKey: process.env.FEDEX_SANDBOX_API_KEY || "",
+				secret: process.env.FEDEX_SANDBOX_SECRET || "",
+				account: process.env.FEDEX_SANDBOX_ACCOUNT || "",
+				oauthUrl: process.env.FEDEX_SANDBOX_OAUTH_URL || "",
+				shipUrl: process.env.FEDEX_SANDBOX_SHIP_URL || "",
+			};
+			if (!fedexCreds.apiKey || !fedexCreds.secret) {
+				return NextResponse.json(
+					{ error: "FedEx sandbox credentials not configured on server" },
+					{ status: 500 }
+				);
+			}
+			result = await buyFedExZplLabel(
+				shipment,
+				serviceType,
+				fedexCreds,
+				todayStamp()
+			);
+		}
 		if (!result.ok || !result.label) {
 			return NextResponse.json(
 				{ error: "carrier returned no label" },
@@ -173,6 +200,7 @@ export async function POST(request: NextRequest) {
 		return NextResponse.json({
 			ok: true,
 			mode: "display",
+			carrier,
 			dispatched: false,
 			jobId: null,
 			printer: null,
@@ -194,7 +222,7 @@ export async function POST(request: NextRequest) {
 		zpl,
 		status: "queued",
 		queuedAt: now,
-		source: "fedex-sandbox-zpl",
+		source: `${carrier}-sandbox-zpl`,
 		...(trackingNumber ? { trackingNumber } : {}),
 	});
 
@@ -204,6 +232,7 @@ export async function POST(request: NextRequest) {
 	return NextResponse.json({
 		ok: true,
 		mode: "dispatch",
+		carrier,
 		dispatched: true,
 		jobId: jobRef.id,
 		printer,
