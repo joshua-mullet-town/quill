@@ -8,32 +8,42 @@ import type { Agent } from "@/lib/types";
 
 export const runtime = "nodejs";
 
-// Quill carrier-backend path: buy a REAL FedEx SANDBOX label in ZPLII format and
-// enqueue it for a target agent + printer in one shot. Sandbox labels print
-// "TEST LABEL - DO NOT SHIP" — a free, non-billing proof that the full
-// buy → enqueue → agent-poll → Zebra-print chain works.
+// Quill carrier-backend path: buy a REAL FedEx SANDBOX label in ZPLII format.
+// Two modes, set by body.mode (default "dispatch" — current proven behavior):
+//
+//   "dispatch" — buy + enqueue the ZPL for a target agent/printer (the print
+//                path). Requires fingerprint + a printer the agent reported.
+//   "display"  — buy + render a preview ONLY; NOTHING is enqueued, nothing goes
+//                to any printer. For the extension's "just show the label" mode.
+//                fingerprint/printer are optional (no agent is touched).
+//
+// Sandbox labels read "TEST LABEL - DO NOT SHIP" — free, non-billing.
 //
 // CONTRACT:
 //   POST /api/buy-and-print
 //   Authorization: Bearer <QUILL_ENQUEUE_TOKEN>
 //   Body: {
-//     fingerprint: string,      // target agent
-//     printer: string,          // target printer (must be reported by the agent)
-//     serviceType?: string,     // default "FEDEX_GROUND"
+//     mode?: "dispatch" | "display",  // default "dispatch"
+//     fingerprint?: string,   // required in dispatch mode; ignored in display
+//     printer?: string,       // required in dispatch mode; must be reported by the agent
+//     serviceType?: string,   // default "FEDEX_GROUND"
 //     shipTo?: { name, street, city, state, zip, country, residential, phone },
 //     packages?: [{ length, width, depth, weight }]
 //   }
-//   200 → { ok, jobId, printer, queuedAt, trackingNumber, docType,
-//           previewImage, previewOk }
+//   200 (dispatch) → { ok, mode:"dispatch", dispatched:true, jobId, printer,
+//                      queuedAt, trackingNumber, docType, previewOk, previewImage }
+//   200 (display)  → { ok, mode:"display", dispatched:false, jobId:null,
+//                      printer:null, queuedAt:null, trackingNumber, docType,
+//                      previewOk, previewImage }
 //   Errors mirror /enqueue (401/404/400) plus 502 on carrier failure, 500 if creds unset.
 //
 // Credentials come from env (FEDEX_SANDBOX_*) — never in the request, never logged.
 //
 // PREVIEW: the 200 carries previewImage — a data:image/png render of the EXACT
-// ZPL we printed (rendered server-side via Labelary, from the SAME single buy, no
+// ZPL bought (rendered server-side via Labelary, from the SAME single buy, no
 // double-buy). The extension shows that image; it never handles ZPL. The preview
 // DEGRADES CLEANLY: if Labelary is down, previewOk is false and previewImage is
-// null, but the print still fired (the job is already enqueued before we render).
+// null — in dispatch mode the job was already enqueued so the print still fired.
 
 const DEFAULT_SHIP_TO = {
 	name: "Quill Print Proof",
@@ -61,38 +71,49 @@ export async function POST(request: NextRequest) {
 	}
 
 	const body = await request.json().catch(() => ({}));
+	const mode = body.mode === "display" ? "display" : "dispatch";
+	const dispatch = mode === "dispatch";
 	const fingerprint =
 		typeof body.fingerprint === "string" ? body.fingerprint : null;
 	const printer = typeof body.printer === "string" ? body.printer : null;
 	const serviceType =
 		typeof body.serviceType === "string" ? body.serviceType : "FEDEX_GROUND";
 
-	if (!fingerprint) {
-		return NextResponse.json({ error: "fingerprint required" }, { status: 400 });
-	}
-	if (!printer) {
-		return NextResponse.json({ error: "printer required" }, { status: 400 });
-	}
+	// In dispatch mode we need a valid target agent + printer (we're enqueuing a
+	// real print job). In display mode nothing is enqueued, so we skip all of that
+	// — no agent is touched.
+	let ref: FirebaseFirestore.DocumentReference | null = null;
+	if (dispatch) {
+		if (!fingerprint) {
+			return NextResponse.json(
+				{ error: "fingerprint required" },
+				{ status: 400 }
+			);
+		}
+		if (!printer) {
+			return NextResponse.json({ error: "printer required" }, { status: 400 });
+		}
 
-	// Validate the agent BEFORE buying a label (don't spend a carrier call on a
-	// target we can't enqueue to).
-	const ref = db.collection("agents").doc(fingerprint);
-	const snap = await ref.get();
-	if (!snap.exists) {
-		return NextResponse.json({ error: "agent not found" }, { status: 404 });
-	}
-	const agent = snap.data() as Agent;
-	if (agent.status !== "approved") {
-		return NextResponse.json(
-			{ error: "agent must be approved to receive print jobs" },
-			{ status: 400 }
-		);
-	}
-	if (!agent.printers.includes(printer)) {
-		return NextResponse.json(
-			{ error: `printer "${printer}" not reported by this agent` },
-			{ status: 400 }
-		);
+		// Validate the agent BEFORE buying a label (don't spend a carrier call on a
+		// target we can't enqueue to).
+		ref = db.collection("agents").doc(fingerprint);
+		const snap = await ref.get();
+		if (!snap.exists) {
+			return NextResponse.json({ error: "agent not found" }, { status: 404 });
+		}
+		const agent = snap.data() as Agent;
+		if (agent.status !== "approved") {
+			return NextResponse.json(
+				{ error: "agent must be approved to receive print jobs" },
+				{ status: 400 }
+			);
+		}
+		if (!agent.printers.includes(printer)) {
+			return NextResponse.json(
+				{ error: `printer "${printer}" not reported by this agent` },
+				{ status: 400 }
+			);
+		}
 	}
 
 	const creds = {
@@ -145,8 +166,29 @@ export async function POST(request: NextRequest) {
 		);
 	}
 
+	// DISPLAY mode: render the preview and return WITHOUT enqueuing anything —
+	// nothing reaches any printer. The response is honest that nothing dispatched.
+	if (!dispatch) {
+		const preview = await renderZplPreview(zpl);
+		return NextResponse.json({
+			ok: true,
+			mode: "display",
+			dispatched: false,
+			jobId: null,
+			printer: null,
+			queuedAt: null,
+			trackingNumber,
+			docType: label.docType,
+			previewOk: preview.ok,
+			previewImage: preview.previewImage,
+		});
+	}
+
+	// DISPATCH mode: enqueue the ZPL for the target printer, then render the
+	// preview. The enqueue happens BEFORE the render so a Labelary outage never
+	// affects the print — it only omits the preview.
 	const now = Date.now();
-	const jobRef = ref.collection("jobs").doc();
+	const jobRef = ref!.collection("jobs").doc();
 	await jobRef.set({
 		printer,
 		zpl,
@@ -156,14 +198,13 @@ export async function POST(request: NextRequest) {
 		...(trackingNumber ? { trackingNumber } : {}),
 	});
 
-	// Render a preview of the EXACT ZPL we just enqueued. This runs AFTER the job
-	// is committed, so a Labelary outage never affects the print — it only omits
-	// the preview (previewOk:false, previewImage:null).
 	const preview = await renderZplPreview(zpl);
 
 	revalidatePath("/");
 	return NextResponse.json({
 		ok: true,
+		mode: "dispatch",
+		dispatched: true,
 		jobId: jobRef.id,
 		printer,
 		queuedAt: now,

@@ -42,30 +42,40 @@ Responses:
 
 ## `POST /api/buy-and-print`
 
-Buy a real **FedEx sandbox** label in ZPLII (thermal) format and enqueue it in
-one shot. Sandbox labels are watermarked **"TEST LABEL - DO NOT SHIP"** — a free,
-non-billing proof of the full path.
+Buy a real **FedEx sandbox** label in ZPLII (thermal) format. Sandbox labels are
+watermarked **"TEST LABEL - DO NOT SHIP"** — free, non-billing.
+
+Two **modes**, set by `mode` (default `"dispatch"`):
+
+- `"dispatch"` — buy + enqueue the label for a target agent/printer (the print
+  path). Requires `fingerprint` + a `printer` the agent reported.
+- `"display"` — buy + render a **preview only**; **nothing is enqueued, nothing
+  reaches any printer**. For the extension's "just show the label" mode.
+  `fingerprint` / `printer` are ignored (no agent is touched).
 
 Body:
 
-| field         | type              | notes                                          |
-|---------------|-------------------|------------------------------------------------|
-| `fingerprint` | string (required) | target agent                                   |
-| `printer`     | string (required) | must be a printer the agent reported           |
-| `serviceType` | string (optional) | default `FEDEX_GROUND`                          |
-| `shipTo`      | object (optional) | `{ name, street, city, state, zip, country, residential, phone }` — sane default if omitted |
-| `packages`    | array (optional)  | `[{ length, width, depth, weight }]` — sane default if omitted |
+| field         | type                         | notes                                          |
+|---------------|------------------------------|------------------------------------------------|
+| `mode`        | `"dispatch"` \| `"display"`  | default `"dispatch"`                           |
+| `fingerprint` | string                       | required in **dispatch** mode; ignored in display |
+| `printer`     | string                       | required in **dispatch** mode; must be a printer the agent reported |
+| `serviceType` | string (optional)            | default `FEDEX_GROUND`                          |
+| `shipTo`      | object (optional)            | `{ name, street, city, state, zip, country, residential, phone }` — sane default if omitted |
+| `packages`    | array (optional)             | `[{ length, width, depth, weight }]` — sane default if omitted |
 
 Responses:
 
-- `200` → `{ ok, jobId, printer, queuedAt, trackingNumber, docType, previewOk, previewImage }`
-  - `previewImage` is a `data:image/png;base64,…` render of the **exact ZPL that
-    printed** (rendered server-side via Labelary from the same single buy — no
+- `200` (dispatch) → `{ ok, mode:"dispatch", dispatched:true, jobId, printer, queuedAt, trackingNumber, docType, previewOk, previewImage }`
+- `200` (display) → `{ ok, mode:"display", dispatched:false, jobId:null, printer:null, queuedAt:null, trackingNumber, docType, previewOk, previewImage }`
+  - `previewImage` is a `data:image/png;base64,…` render of the **exact ZPL** that
+    was bought (rendered server-side via Labelary from the same single buy — no
     second carrier call). The extension shows this image; it never handles ZPL.
   - `previewOk` is `false` and `previewImage` is `null` if the render service was
-    unreachable. The **print still fired** — only the preview degrades.
-- `401` / `404` / `400` as above; `500` if FedEx sandbox creds aren't configured;
-  `502` on a carrier failure.
+    unreachable. In dispatch mode the **print still fired** — only the preview degrades.
+- `401` (any mode, bad/no token); in **dispatch** mode also `404` (agent not found)
+  / `400` (missing fingerprint or printer, agent not approved, printer not reported);
+  `500` if FedEx sandbox creds aren't configured; `502` on a carrier failure.
 
 FedEx credentials come from env (`FEDEX_SANDBOX_API_KEY`, `FEDEX_SANDBOX_SECRET`,
 `FEDEX_SANDBOX_ACCOUNT`, optional `FEDEX_SANDBOX_OAUTH_URL` / `FEDEX_SANDBOX_SHIP_URL`)
