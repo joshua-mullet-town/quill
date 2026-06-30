@@ -4,3 +4,25 @@ runConfig:
   minInstances: 0
   maxInstances: 5
   concurrency: 80
+
+env:
+  - variable: QUILL_ENQUEUE_TOKEN
+    secret: QUILL_ENQUEUE_TOKEN
+    availability:
+      - RUNTIME
+  - variable: FEDEX_SANDBOX_API_KEY
+    secret: FEDEX_SANDBOX_API_KEY
+    availability:
+      - RUNTIME
+  - variable: FEDEX_SANDBOX_SECRET
+    secret: FEDEX_SANDBOX_SECRET
+    availability:
+      - RUNTIME
+  - variable: FEDEX_SANDBOX_ACCOUNT
+    secret: FEDEX_SANDBOX_ACCOUNT
+    availability:
+      - RUNTIME
+  - variable: FEDEX_SANDBOX_OAUTH_URL
+    secret: FEDEX_SANDBOX_OAUTH_URL
+    availability:
+      - RUNTIME
