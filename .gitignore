@@ -6,3 +6,6 @@ out/
 *.log
 next-env.d.ts
 tsconfig.tsbuildinfo
+
+# Worktree bootstrap symlink — steward plumbing, never deploy
+env.sh
