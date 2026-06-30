@@ -26,3 +26,19 @@ env:
     secret: FEDEX_SANDBOX_OAUTH_URL
     availability:
       - RUNTIME
+  - variable: UPS_SANDBOX_CLIENT_ID
+    secret: UPS_SANDBOX_CLIENT_ID
+    availability:
+      - RUNTIME
+  - variable: UPS_SANDBOX_CLIENT_SECRET
+    secret: UPS_SANDBOX_CLIENT_SECRET
+    availability:
+      - RUNTIME
+  - variable: UPS_SANDBOX_ACCOUNT
+    secret: UPS_SANDBOX_ACCOUNT
+    availability:
+      - RUNTIME
+  - variable: UPS_SANDBOX_OAUTH_URL
+    secret: UPS_SANDBOX_OAUTH_URL
+    availability:
+      - RUNTIME
