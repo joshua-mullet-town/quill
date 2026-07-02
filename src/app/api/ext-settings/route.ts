@@ -158,6 +158,29 @@ async function loadArray(businessId: string, namespace: string) {
 }
 
 // ---- save (reconcile: write present entries, delete absent) -----------------
+//
+// A reconcile can involve arbitrarily many writes (one set per entry + one delete
+// per removed entry). Firestore caps a single batch at 500 operations, so we
+// collect every op and commit them in ≤500-op chunks. Without this, a large
+// collection (many customers / SKUs) would exceed 500 and the save would throw —
+// re-introducing a scale ceiling, which is the exact thing this refactor removes.
+
+type Op =
+	| { type: "set"; ref: FirebaseFirestore.DocumentReference; data: FirebaseFirestore.DocumentData }
+	| { type: "delete"; ref: FirebaseFirestore.DocumentReference };
+
+const MAX_BATCH_OPS = 450; // under Firestore's 500 ceiling, with headroom
+
+async function commitOps(ops: Op[]) {
+	for (let i = 0; i < ops.length; i += MAX_BATCH_OPS) {
+		const batch = db.batch();
+		for (const op of ops.slice(i, i + MAX_BATCH_OPS)) {
+			if (op.type === "set") batch.set(op.ref, op.data);
+			else batch.delete(op.ref);
+		}
+		await batch.commit();
+	}
+}
 
 async function writeMap(
 	businessId: string,
@@ -167,16 +190,16 @@ async function writeMap(
 	const col = collectionRef(businessId, namespace);
 	const existing = await col.get();
 	const wantIds = new Set(Object.keys(map).map(encodeId));
-	const batch = db.batch();
+	const ops: Op[] = [];
 	// Upsert present entries.
 	for (const [key, value] of Object.entries(map)) {
-		batch.set(col.doc(encodeId(key)), { key, value, updatedAt: Date.now() });
+		ops.push({ type: "set", ref: col.doc(encodeId(key)), data: { key, value, updatedAt: Date.now() } });
 	}
 	// Delete entries no longer present.
 	for (const d of existing.docs) {
-		if (!wantIds.has(d.id)) batch.delete(d.ref);
+		if (!wantIds.has(d.id)) ops.push({ type: "delete", ref: d.ref });
 	}
-	await batch.commit();
+	await commitOps(ops);
 }
 
 async function writeArray(
@@ -191,14 +214,14 @@ async function writeArray(
 			!!r && typeof r === "object" && typeof (r as { id?: unknown }).id === "string",
 	);
 	const wantIds = new Set(items.map((r) => encodeId(r.id)));
-	const batch = db.batch();
+	const ops: Op[] = [];
 	for (const rec of items) {
-		batch.set(col.doc(encodeId(rec.id)), { key: rec.id, value: rec, updatedAt: Date.now() });
+		ops.push({ type: "set", ref: col.doc(encodeId(rec.id)), data: { key: rec.id, value: rec, updatedAt: Date.now() } });
 	}
 	for (const d of existing.docs) {
-		if (!wantIds.has(d.id)) batch.delete(d.ref);
+		if (!wantIds.has(d.id)) ops.push({ type: "delete", ref: d.ref });
 	}
-	await batch.commit();
+	await commitOps(ops);
 }
 
 async function writeSingleton(
