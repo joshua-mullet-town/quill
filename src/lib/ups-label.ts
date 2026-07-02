@@ -74,28 +74,33 @@ function b64(str: string): string {
  *   LabelStockSize: { Height:"6", Width:"4" } — required for thermal ZPL stock
  * All numerics are strings (UPS contract).
  */
-// UPS reference-number code that renders in the label's reference area. "28" is
-// the generic shipper reference that prints on the label. If a live label ever
-// shows a wrong caption for it, this one constant is the single knob to turn.
-const UPS_REFERENCE_CODE = "28";
+// UPS reference codes whose UPS-DEFINED captions match the branding we want.
+// The caption UPS prints next to a reference is driven by its Code, NOT free text:
+//   "PM" → UPS prints "Part No.: <value>"
+//   "SA" → UPS prints "Salesperson: <value>"
+// So we send the BARE value (just "800" / "Crescent Memorial") and let UPS supply
+// the caption — which renders exactly the WorldShip-style "Part No.:"/"Salesperson:"
+// lines the client wants, with NO generic "Reference No.N:" prefix. (A generic code
+// like the old "28" made UPS fall back to "Reference No.1:", which is why the label
+// read "Reference No.1: Part Number: 800" before.) Verified on a real UPS sandbox
+// label: PM→"Part No.: 800", SA→"Salesperson: Crescent Memorial", no "Reference No."
+const UPS_PART_NUMBER_CODE = "PM";
+const UPS_SALESPERSON_CODE = "SA";
 
-// Build the UPS Shipment.ReferenceNumber array from the branding fields. Each is
-// a { Code, Value } — and the Value carries the FULL human-readable label
-// ("Part Number: 800", "Salesperson: Crescent Memorial") because UPS controls the
-// caption for a reference code, so embedding the prefix in the value guarantees
-// the text Cory expects prints regardless of UPS's own caption. Blank fields are
-// omitted entirely (no empty reference line). Returns undefined when nothing to
-// show, so the key is left off the request.
+// Build the UPS Package.ReferenceNumber array from the branding fields. Each is a
+// { Code, Value } where the Code selects the printed caption and the Value is the
+// bare content. Blank fields are omitted entirely (no empty reference line).
+// Returns undefined when nothing to show, so the key is left off the request.
 function buildReferenceNumbers(shipment: Shipment) {
 	const s = shipment || {};
 	const partNumber = (s.partNumber == null ? "" : String(s.partNumber)).trim();
 	const salesperson = (s.salesperson == null ? "" : String(s.salesperson)).trim();
 	const refs: { Code: string; Value: string }[] = [];
 	if (partNumber) {
-		refs.push({ Code: UPS_REFERENCE_CODE, Value: `Part Number: ${partNumber}` });
+		refs.push({ Code: UPS_PART_NUMBER_CODE, Value: partNumber });
 	}
 	if (salesperson) {
-		refs.push({ Code: UPS_REFERENCE_CODE, Value: `Salesperson: ${salesperson}` });
+		refs.push({ Code: UPS_SALESPERSON_CODE, Value: salesperson });
 	}
 	return refs.length ? refs : undefined;
 }
