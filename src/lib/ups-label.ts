@@ -74,6 +74,32 @@ function b64(str: string): string {
  *   LabelStockSize: { Height:"6", Width:"4" } — required for thermal ZPL stock
  * All numerics are strings (UPS contract).
  */
+// UPS reference-number code that renders in the label's reference area. "28" is
+// the generic shipper reference that prints on the label. If a live label ever
+// shows a wrong caption for it, this one constant is the single knob to turn.
+const UPS_REFERENCE_CODE = "28";
+
+// Build the UPS Shipment.ReferenceNumber array from the branding fields. Each is
+// a { Code, Value } — and the Value carries the FULL human-readable label
+// ("Part Number: 800", "Salesperson: Crescent Memorial") because UPS controls the
+// caption for a reference code, so embedding the prefix in the value guarantees
+// the text Cory expects prints regardless of UPS's own caption. Blank fields are
+// omitted entirely (no empty reference line). Returns undefined when nothing to
+// show, so the key is left off the request.
+function buildReferenceNumbers(shipment: Shipment) {
+	const s = shipment || {};
+	const partNumber = (s.partNumber == null ? "" : String(s.partNumber)).trim();
+	const salesperson = (s.salesperson == null ? "" : String(s.salesperson)).trim();
+	const refs: { Code: string; Value: string }[] = [];
+	if (partNumber) {
+		refs.push({ Code: UPS_REFERENCE_CODE, Value: `Part Number: ${partNumber}` });
+	}
+	if (salesperson) {
+		refs.push({ Code: UPS_REFERENCE_CODE, Value: `Salesperson: ${salesperson}` });
+	}
+	return refs.length ? refs : undefined;
+}
+
 export function buildUpsZplLabelRequest(shipment: Shipment, serviceCode: string) {
 	const s = shipment || {};
 	const from = s.shipFrom || DEFAULT_SHIP_FROM;
@@ -81,6 +107,7 @@ export function buildUpsZplLabelRequest(shipment: Shipment, serviceCode: string)
 	const pkgs: Package[] = s.packages && s.packages.length ? s.packages : [];
 	const shipperContact = from.contact || DEFAULT_SHIPPER_CONTACT;
 	const account = s.accountNumber || "";
+	const referenceNumbers = buildReferenceNumbers(s);
 
 	const fromAddress = {
 		AddressLine: streetLines(from),
@@ -139,6 +166,12 @@ export function buildUpsZplLabelRequest(shipment: Shipment, serviceCode: string)
 				Service: { Code: serviceCode || "03", Description: "Ground" },
 				Package: pkgs.map((p) => ({
 					Packaging: { Code: "02", Description: "Customer Supplied Package" },
+					// Label branding (Cory feedback): part number + salesperson print in
+					// the package's reference area. UPS requires ReferenceNumber at the
+					// PACKAGE level (not Shipment) for US-domestic shipments — a
+					// Shipment-level ReferenceNumber returns error 120541. Key omitted
+					// entirely when both branding fields are blank.
+					...(referenceNumbers ? { ReferenceNumber: referenceNumbers } : {}),
 					Dimensions: {
 						UnitOfMeasurement: { Code: "IN", Description: "Inches" },
 						Length: String(numOrZero(p.length)),
