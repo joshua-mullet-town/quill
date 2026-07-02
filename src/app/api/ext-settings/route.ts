@@ -114,6 +114,25 @@ function singletonRef(businessId: string, namespace: string) {
 function legacyBlobRef(businessId: string, namespace: string) {
 	return businessRef(businessId).collection("appSettings").doc(namespace);
 }
+// The ORIGINAL blob doc used the cv-PREFIXED key (appSettings/cvModeToggles), not
+// the clean namespace — so retiring must target this too, or the old blob lingers
+// visibly in the appSettings collection. null if the namespace has no cv-name.
+function legacyCvBlobRef(businessId: string, namespace: string) {
+	const cv = LEGACY_CV_NAME[namespace];
+	return cv ? businessRef(businessId).collection("appSettings").doc(cv) : null;
+}
+
+// The old blob value for a namespace, preferring the cv-prefixed blob (the
+// original key) over the clean-name blob. Returns null if neither exists.
+async function readBlobValue(businessId: string, namespace: string) {
+	const cvBlobRef = legacyCvBlobRef(businessId, namespace);
+	if (cvBlobRef) {
+		const cvBlob = await cvBlobRef.get();
+		if (cvBlob.exists) return cvBlob.data()?.value ?? null;
+	}
+	const blob = await legacyBlobRef(businessId, namespace).get();
+	return blob.exists ? (blob.data()?.value ?? null) : null;
+}
 // The previous (cv-prefixed) COLLECTION for a namespace — the intermediate storage
 // shape (proper collections, but under the old cv-name). null if this namespace
 // never had a cv-name (defensive; every current namespace does).
@@ -147,15 +166,19 @@ function docsToMap(docs: FirebaseFirestore.QueryDocumentSnapshot[]) {
 // Whichever source is imported, all OLDER sources are also retired, so nothing
 // stale lingers to clobber or resurrect.
 
-// Retire the legacy singleton sources (cv-named appConfig doc + appSettings blob).
+// Delete a doc ref if it exists (helper for the retire steps).
+async function deleteIfExists(ref: FirebaseFirestore.DocumentReference | null) {
+	if (!ref) return;
+	const snap = await ref.get();
+	if (snap.exists) await ref.delete();
+}
+
+// Retire the legacy singleton sources: the cv-named appConfig doc AND both
+// appSettings blobs (the clean-name blob and the ORIGINAL cv-prefixed blob).
 async function retireLegacySingleton(businessId: string, namespace: string) {
-	const cvRef = legacyCvSingletonRef(businessId, namespace);
-	if (cvRef) {
-		const cvSnap = await cvRef.get();
-		if (cvSnap.exists) await cvRef.delete();
-	}
-	const blobSnap = await legacyBlobRef(businessId, namespace).get();
-	if (blobSnap.exists) await legacyBlobRef(businessId, namespace).delete();
+	await deleteIfExists(legacyCvSingletonRef(businessId, namespace));
+	await deleteIfExists(legacyBlobRef(businessId, namespace));
+	await deleteIfExists(legacyCvBlobRef(businessId, namespace)); // appSettings/cvModeToggles etc.
 }
 
 async function loadSingleton(businessId: string, namespace: string) {
@@ -166,13 +189,17 @@ async function loadSingleton(businessId: string, namespace: string) {
 		return snap.data()?.value ?? null;
 	}
 
-	// Next: the cv-named singleton doc (appConfig/cvModeToggles), then the blob.
+	// Value precedence (newest first): cv-named appConfig doc → cv-prefixed blob →
+	// clean-name blob. Whichever has a value seeds the clean singleton; then retire.
 	const cvRef = legacyCvSingletonRef(businessId, namespace);
 	const cvSnap = cvRef ? await cvRef.get() : null;
+	const cvBlobRef = legacyCvBlobRef(businessId, namespace);
+	const cvBlobSnap = cvBlobRef ? await cvBlobRef.get() : null;
 	const blobSnap = await legacyBlobRef(businessId, namespace).get();
 
 	let value: unknown = null;
 	if (cvSnap?.exists) value = cvSnap.data()?.value ?? null;
+	else if (cvBlobSnap?.exists) value = cvBlobSnap.data()?.value ?? null;
 	else if (blobSnap.exists) value = blobSnap.data()?.value ?? null;
 
 	if (value !== null) await writeSingleton(businessId, namespace, value);
@@ -188,8 +215,8 @@ async function loadSingleton(businessId: string, namespace: string) {
 // was never re-loaded.) Idempotent: a no-op once the sources are gone.
 async function retireLegacySources(businessId: string, namespace: string) {
 	await retireCollection(legacyCvCollectionRef(businessId, namespace));
-	const blob = await legacyBlobRef(businessId, namespace).get();
-	if (blob.exists) await legacyBlobRef(businessId, namespace).delete();
+	await deleteIfExists(legacyBlobRef(businessId, namespace)); // appSettings/{clean}
+	await deleteIfExists(legacyCvBlobRef(businessId, namespace)); // appSettings/{cvName}
 }
 
 async function loadMap(businessId: string, namespace: string) {
@@ -204,10 +231,10 @@ async function loadMap(businessId: string, namespace: string) {
 	}
 
 	// Empty clean collection → migrate from the newest legacy source with data.
+	// Precedence: cv-collection → cv-prefixed blob → clean-name blob.
 	const cvCol = legacyCvCollectionRef(businessId, namespace);
 	const cvSnap = cvCol ? await cvCol.get() : null;
-	const blob = await legacyBlobRef(businessId, namespace).get();
-	const blobVal = blob.exists ? blob.data()?.value : null;
+	const blobVal = await readBlobValue(businessId, namespace);
 
 	let imported: Record<string, unknown> | null = null;
 	if (cvSnap && !cvSnap.empty) {
@@ -231,8 +258,7 @@ async function loadArray(businessId: string, namespace: string) {
 
 	const cvCol = legacyCvCollectionRef(businessId, namespace);
 	const cvSnap = cvCol ? await cvCol.get() : null;
-	const blob = await legacyBlobRef(businessId, namespace).get();
-	const blobVal = blob.exists ? blob.data()?.value : null;
+	const blobVal = await readBlobValue(businessId, namespace);
 
 	let imported: unknown[] | null = null;
 	if (cvSnap && !cvSnap.empty) {
