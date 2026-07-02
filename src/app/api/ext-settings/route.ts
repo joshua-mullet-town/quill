@@ -147,9 +147,24 @@ function docsToMap(docs: FirebaseFirestore.QueryDocumentSnapshot[]) {
 // Whichever source is imported, all OLDER sources are also retired, so nothing
 // stale lingers to clobber or resurrect.
 
+// Retire the legacy singleton sources (cv-named appConfig doc + appSettings blob).
+async function retireLegacySingleton(businessId: string, namespace: string) {
+	const cvRef = legacyCvSingletonRef(businessId, namespace);
+	if (cvRef) {
+		const cvSnap = await cvRef.get();
+		if (cvSnap.exists) await cvRef.delete();
+	}
+	const blobSnap = await legacyBlobRef(businessId, namespace).get();
+	if (blobSnap.exists) await legacyBlobRef(businessId, namespace).delete();
+}
+
 async function loadSingleton(businessId: string, namespace: string) {
 	const snap = await singletonRef(businessId, namespace).get();
-	if (snap.exists) return snap.data()?.value ?? null;
+	if (snap.exists) {
+		// Authoritative — but still retire leftover legacy sources so none linger.
+		await retireLegacySingleton(businessId, namespace);
+		return snap.data()?.value ?? null;
+	}
 
 	// Next: the cv-named singleton doc (appConfig/cvModeToggles), then the blob.
 	const cvRef = legacyCvSingletonRef(businessId, namespace);
@@ -161,15 +176,32 @@ async function loadSingleton(businessId: string, namespace: string) {
 	else if (blobSnap.exists) value = blobSnap.data()?.value ?? null;
 
 	if (value !== null) await writeSingleton(businessId, namespace, value);
-	// Retire every older source regardless (so none can resurrect/clobber later).
-	if (cvRef && cvSnap?.exists) await cvRef.delete();
-	if (blobSnap.exists) await legacyBlobRef(businessId, namespace).delete();
+	await retireLegacySingleton(businessId, namespace);
 	return value;
+}
+
+// Retire the legacy sources (cv-named collection + appSettings blob) for a
+// namespace. Called on EVERY load — unconditionally — so old cv-named collections
+// don't linger visibly in Firestore once the clean collection is authoritative.
+// (The earlier version only retired them in the import branch, so a cv-collection
+// stuck around forever if the clean collection already had data or the namespace
+// was never re-loaded.) Idempotent: a no-op once the sources are gone.
+async function retireLegacySources(businessId: string, namespace: string) {
+	await retireCollection(legacyCvCollectionRef(businessId, namespace));
+	const blob = await legacyBlobRef(businessId, namespace).get();
+	if (blob.exists) await legacyBlobRef(businessId, namespace).delete();
 }
 
 async function loadMap(businessId: string, namespace: string) {
 	const col = await collectionRef(businessId, namespace).get();
-	if (!col.empty) return docsToMap(col.docs);
+	if (!col.empty) {
+		// Clean collection is authoritative — but still retire any leftover legacy
+		// sources so they don't linger in Firestore (they can't resurrect anyway,
+		// since we early-return on the clean data, but Josh should not SEE stale
+		// cv-named collections sitting around).
+		await retireLegacySources(businessId, namespace);
+		return docsToMap(col.docs);
+	}
 
 	// Empty clean collection → migrate from the newest legacy source with data.
 	const cvCol = legacyCvCollectionRef(businessId, namespace);
@@ -185,16 +217,17 @@ async function loadMap(businessId: string, namespace: string) {
 	}
 	if (imported) await writeMap(businessId, namespace, imported);
 
-	// Retire ALL older sources (delete the cv collection's docs + the blob), so a
-	// later clear can't re-import from either. Uses the same chunked-batch discipline.
-	await retireCollection(cvCol);
-	if (blob.exists) await legacyBlobRef(businessId, namespace).delete();
+	// Retire ALL older sources so a later clear can't re-import from either.
+	await retireLegacySources(businessId, namespace);
 	return imported ?? {};
 }
 
 async function loadArray(businessId: string, namespace: string) {
 	const col = await collectionRef(businessId, namespace).get();
-	if (!col.empty) return col.docs.map((d) => d.data().value).filter((v) => v != null);
+	if (!col.empty) {
+		await retireLegacySources(businessId, namespace);
+		return col.docs.map((d) => d.data().value).filter((v) => v != null);
+	}
 
 	const cvCol = legacyCvCollectionRef(businessId, namespace);
 	const cvSnap = cvCol ? await cvCol.get() : null;
@@ -209,8 +242,7 @@ async function loadArray(businessId: string, namespace: string) {
 	}
 	if (imported) await writeArray(businessId, namespace, imported);
 
-	await retireCollection(cvCol);
-	if (blob.exists) await legacyBlobRef(businessId, namespace).delete();
+	await retireLegacySources(businessId, namespace);
 	return imported ?? [];
 }
 
