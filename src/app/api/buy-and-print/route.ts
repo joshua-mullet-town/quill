@@ -129,6 +129,11 @@ export async function POST(request: NextRequest) {
 	const shipment: Shipment = {
 		shipTo: body.shipTo || DEFAULT_SHIP_TO,
 		packages: body.packages || DEFAULT_PACKAGES,
+		// Label branding (Cory feedback): part number + salesperson print in the
+		// UPS label's reference area. Forwarded from the extension; blank/absent
+		// values are omitted from the label by the UPS builder. UPS-only today.
+		...(typeof body.partNumber === "string" ? { partNumber: body.partNumber } : {}),
+		...(typeof body.salesperson === "string" ? { salesperson: body.salesperson } : {}),
 	};
 
 	// Buy the label (sandbox, ZPL). The raw label bytes never get logged.

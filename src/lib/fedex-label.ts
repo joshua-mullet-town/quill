@@ -44,6 +44,13 @@ export interface Shipment {
 	shipTo?: Address;
 	accountNumber?: string;
 	packages?: Package[];
+	// Label branding (Cory feedback): the distributor's part number and
+	// salesperson name print on the UPS label's reference area, replicating what
+	// their existing WorldShip workflow produces. Both optional; a blank value is
+	// omitted from the label. Only wired for UPS today (their live carrier) — see
+	// ups-label.ts. FedEx label buys ignore these (FedEx branding is not in scope).
+	partNumber?: string;
+	salesperson?: string;
 }
 
 export interface FedexLabel {
