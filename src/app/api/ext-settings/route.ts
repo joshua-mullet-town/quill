@@ -61,13 +61,30 @@ interface SettingsRequest {
 //   "array"     → collection keyed by each element's `id`
 //   "singleton" → a single config doc under appConfig
 type Shape = "map" | "array" | "singleton";
+// Namespaces are now BUSINESS-AGNOSTIC (no "cv" prefix) — the businessId already
+// scopes them under businesses/{businessId}/, so hardcoding "cv" into the shared
+// collection names was contradictory for a multi-tenant design.
 const SHAPES: Record<string, Shape> = {
-	cvIgnoreList: "map",
-	cvDimStore: "map",
-	cvBillingMemory: "map",
-	cvHistory: "array",
-	cvModeToggles: "singleton",
-	cvBrandingDefaults: "singleton",
+	ignoreList: "map",
+	dimStore: "map",
+	billingMemory: "map",
+	history: "array",
+	modeToggles: "singleton",
+	brandingDefaults: "singleton",
+};
+
+// The previous (cv-prefixed) collection/doc name for each clean namespace. The
+// load-time migration imports from this older collection into the clean one, then
+// retires the cv-named source — so existing data carries over on the rename and
+// can't resurrect after a later clear (same source-delete discipline that killed
+// the earlier resurrection bug).
+const LEGACY_CV_NAME: Record<string, string> = {
+	ignoreList: "cvIgnoreList",
+	dimStore: "cvDimStore",
+	billingMemory: "cvBillingMemory",
+	history: "cvHistory",
+	modeToggles: "cvModeToggles",
+	brandingDefaults: "cvBrandingDefaults",
 };
 
 // Firestore doc-id safety: segments become path parts. Reject slashes/empty.
@@ -97,64 +114,104 @@ function singletonRef(businessId: string, namespace: string) {
 function legacyBlobRef(businessId: string, namespace: string) {
 	return businessRef(businessId).collection("appSettings").doc(namespace);
 }
+// The previous (cv-prefixed) COLLECTION for a namespace — the intermediate storage
+// shape (proper collections, but under the old cv-name). null if this namespace
+// never had a cv-name (defensive; every current namespace does).
+function legacyCvCollectionRef(businessId: string, namespace: string) {
+	const cv = LEGACY_CV_NAME[namespace];
+	return cv ? businessRef(businessId).collection(cv) : null;
+}
+function legacyCvSingletonRef(businessId: string, namespace: string) {
+	const cv = LEGACY_CV_NAME[namespace];
+	return cv ? businessRef(businessId).collection("appConfig").doc(cv) : null;
+}
+
+// Read an entry-doc collection into a { [key]: value } map (or [] for arrays).
+function docsToMap(docs: FirebaseFirestore.QueryDocumentSnapshot[]) {
+	const out: Record<string, unknown> = {};
+	for (const d of docs) {
+		const data = d.data();
+		const k = typeof data.key === "string" ? data.key : d.id;
+		out[k] = data.value;
+	}
+	return out;
+}
 
 // ---- load -------------------------------------------------------------------
+//
+// MIGRATION PRECEDENCE (newest source wins): the clean collection is authoritative.
+// If it's empty, import from the next-newest source that has data and RETIRE that
+// source (so a later clear can't resurrect from it — the discipline that killed the
+// original resurrection bug, now applied on BOTH legacy hops):
+//   clean collection  →  cv-named collection (item-6 shape)  →  appSettings blob (oldest)
+// Whichever source is imported, all OLDER sources are also retired, so nothing
+// stale lingers to clobber or resurrect.
 
 async function loadSingleton(businessId: string, namespace: string) {
 	const snap = await singletonRef(businessId, namespace).get();
 	if (snap.exists) return snap.data()?.value ?? null;
-	// Migration fallback: old blob doc.
-	const legacy = await legacyBlobRef(businessId, namespace).get();
-	return legacy.exists ? (legacy.data()?.value ?? null) : null;
+
+	// Next: the cv-named singleton doc (appConfig/cvModeToggles), then the blob.
+	const cvRef = legacyCvSingletonRef(businessId, namespace);
+	const cvSnap = cvRef ? await cvRef.get() : null;
+	const blobSnap = await legacyBlobRef(businessId, namespace).get();
+
+	let value: unknown = null;
+	if (cvSnap?.exists) value = cvSnap.data()?.value ?? null;
+	else if (blobSnap.exists) value = blobSnap.data()?.value ?? null;
+
+	if (value !== null) await writeSingleton(businessId, namespace, value);
+	// Retire every older source regardless (so none can resurrect/clobber later).
+	if (cvRef && cvSnap?.exists) await cvRef.delete();
+	if (blobSnap.exists) await legacyBlobRef(businessId, namespace).delete();
+	return value;
 }
 
 async function loadMap(businessId: string, namespace: string) {
 	const col = await collectionRef(businessId, namespace).get();
-	if (!col.empty) {
-		const out: Record<string, unknown> = {};
-		for (const d of col.docs) {
-			const data = d.data();
-			// Each entry doc carries { key, value }. Fall back to the doc id if an
-			// older entry lacks the stored key.
-			const k = typeof data.key === "string" ? data.key : d.id;
-			out[k] = data.value;
-		}
-		return out;
+	if (!col.empty) return docsToMap(col.docs);
+
+	// Empty clean collection → migrate from the newest legacy source with data.
+	const cvCol = legacyCvCollectionRef(businessId, namespace);
+	const cvSnap = cvCol ? await cvCol.get() : null;
+	const blob = await legacyBlobRef(businessId, namespace).get();
+	const blobVal = blob.exists ? blob.data()?.value : null;
+
+	let imported: Record<string, unknown> | null = null;
+	if (cvSnap && !cvSnap.empty) {
+		imported = docsToMap(cvSnap.docs); // cv-collection is newer than the blob
+	} else if (blobVal && typeof blobVal === "object" && !Array.isArray(blobVal)) {
+		imported = blobVal as Record<string, unknown>;
 	}
-	// Empty collection → one-time import from the legacy blob if present. We DELETE
-	// the legacy blob right after importing so "empty collection" reliably means
-	// "empty," not "not-yet-migrated." Without this, a user who legitimately CLEARS
-	// a setting (empties the collection) would have the stale blob re-imported on
-	// the next load — silent data resurrection. Delete = migrate exactly once.
-	const legacy = await legacyBlobRef(businessId, namespace).get();
-	const blob = legacy.exists ? legacy.data()?.value : null;
-	if (blob && typeof blob === "object" && !Array.isArray(blob)) {
-		await writeMap(businessId, namespace, blob as Record<string, unknown>);
-		await legacyBlobRef(businessId, namespace).delete();
-		return blob;
-	}
-	// Nothing in the collection and no importable blob — but still retire any
-	// legacy doc so it can't resurrect later (e.g. a blob that wasn't a plain map).
-	if (legacy.exists) await legacyBlobRef(businessId, namespace).delete();
-	return {};
+	if (imported) await writeMap(businessId, namespace, imported);
+
+	// Retire ALL older sources (delete the cv collection's docs + the blob), so a
+	// later clear can't re-import from either. Uses the same chunked-batch discipline.
+	await retireCollection(cvCol);
+	if (blob.exists) await legacyBlobRef(businessId, namespace).delete();
+	return imported ?? {};
 }
 
 async function loadArray(businessId: string, namespace: string) {
 	const col = await collectionRef(businessId, namespace).get();
-	if (!col.empty) {
-		return col.docs.map((d) => d.data().value).filter((v) => v != null);
+	if (!col.empty) return col.docs.map((d) => d.data().value).filter((v) => v != null);
+
+	const cvCol = legacyCvCollectionRef(businessId, namespace);
+	const cvSnap = cvCol ? await cvCol.get() : null;
+	const blob = await legacyBlobRef(businessId, namespace).get();
+	const blobVal = blob.exists ? blob.data()?.value : null;
+
+	let imported: unknown[] | null = null;
+	if (cvSnap && !cvSnap.empty) {
+		imported = cvSnap.docs.map((d) => d.data().value).filter((v) => v != null);
+	} else if (Array.isArray(blobVal)) {
+		imported = blobVal;
 	}
-	// Same one-time-and-retire migration as loadMap (see there for why the delete
-	// is required — it prevents cleared-history from resurrecting on next load).
-	const legacy = await legacyBlobRef(businessId, namespace).get();
-	const blob = legacy.exists ? legacy.data()?.value : null;
-	if (Array.isArray(blob)) {
-		await writeArray(businessId, namespace, blob);
-		await legacyBlobRef(businessId, namespace).delete();
-		return blob;
-	}
-	if (legacy.exists) await legacyBlobRef(businessId, namespace).delete();
-	return [];
+	if (imported) await writeArray(businessId, namespace, imported);
+
+	await retireCollection(cvCol);
+	if (blob.exists) await legacyBlobRef(businessId, namespace).delete();
+	return imported ?? [];
 }
 
 // ---- save (reconcile: write present entries, delete absent) -----------------
@@ -180,6 +237,18 @@ async function commitOps(ops: Op[]) {
 		}
 		await batch.commit();
 	}
+}
+
+// Delete every doc in a legacy collection (used to RETIRE a cv-named collection
+// after its data is imported into the clean one). Chunked at ≤450 deletes so a
+// large legacy collection doesn't exceed Firestore's batch cap. No-op on null.
+async function retireCollection(
+	col: FirebaseFirestore.CollectionReference | null,
+) {
+	if (!col) return;
+	const snap = await col.get();
+	if (snap.empty) return;
+	await commitOps(snap.docs.map((d) => ({ type: "delete" as const, ref: d.ref })));
 }
 
 async function writeMap(
