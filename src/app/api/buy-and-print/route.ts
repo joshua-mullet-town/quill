@@ -200,6 +200,14 @@ export async function POST(request: NextRequest) {
 
 	// DISPLAY mode: render the preview and return WITHOUT enqueuing anything —
 	// nothing reaches any printer. The response is honest that nothing dispatched.
+	//
+	// labelZpl: the raw ZPL of the bought label, returned in DISPLAY MODE ONLY.
+	// Display buys a free SANDBOX TEST label (watermarked, DEFAULT_SHIP_TO/PACKAGES,
+	// no real customer PII and no secrets — just label markup), so exposing the ZPL
+	// here is safe and lets a caller verify what actually printed at the field level
+	// (e.g. the branding reference lines) instead of OCR-reading a rendered preview.
+	// The DISPATCH path deliberately does NOT return labelZpl (it can carry real
+	// shipment data on the print path) — see the dispatch return below.
 	if (!dispatch) {
 		const preview = await renderZplPreview(zpl);
 		return NextResponse.json({
@@ -214,6 +222,7 @@ export async function POST(request: NextRequest) {
 			docType: label.docType,
 			previewOk: preview.ok,
 			previewImage: preview.previewImage,
+			labelZpl: zpl,
 		});
 	}
 
