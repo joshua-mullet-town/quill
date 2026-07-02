@@ -121,13 +121,21 @@ async function loadMap(businessId: string, namespace: string) {
 		}
 		return out;
 	}
-	// Empty collection → one-time import from the legacy blob if present.
+	// Empty collection → one-time import from the legacy blob if present. We DELETE
+	// the legacy blob right after importing so "empty collection" reliably means
+	// "empty," not "not-yet-migrated." Without this, a user who legitimately CLEARS
+	// a setting (empties the collection) would have the stale blob re-imported on
+	// the next load — silent data resurrection. Delete = migrate exactly once.
 	const legacy = await legacyBlobRef(businessId, namespace).get();
 	const blob = legacy.exists ? legacy.data()?.value : null;
 	if (blob && typeof blob === "object" && !Array.isArray(blob)) {
 		await writeMap(businessId, namespace, blob as Record<string, unknown>);
+		await legacyBlobRef(businessId, namespace).delete();
 		return blob;
 	}
+	// Nothing in the collection and no importable blob — but still retire any
+	// legacy doc so it can't resurrect later (e.g. a blob that wasn't a plain map).
+	if (legacy.exists) await legacyBlobRef(businessId, namespace).delete();
 	return {};
 }
 
@@ -136,12 +144,16 @@ async function loadArray(businessId: string, namespace: string) {
 	if (!col.empty) {
 		return col.docs.map((d) => d.data().value).filter((v) => v != null);
 	}
+	// Same one-time-and-retire migration as loadMap (see there for why the delete
+	// is required — it prevents cleared-history from resurrecting on next load).
 	const legacy = await legacyBlobRef(businessId, namespace).get();
 	const blob = legacy.exists ? legacy.data()?.value : null;
 	if (Array.isArray(blob)) {
 		await writeArray(businessId, namespace, blob);
+		await legacyBlobRef(businessId, namespace).delete();
 		return blob;
 	}
+	if (legacy.exists) await legacyBlobRef(businessId, namespace).delete();
 	return [];
 }
 
